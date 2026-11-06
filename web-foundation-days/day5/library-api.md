@@ -1,31 +1,69 @@
-# Library API Documentation
-
-Base URL: `https://api.library.com/v1`
+# Library Management API Documentation
 
 ## Endpoints
 
-### 1. List All Books
-- **Method:** `GET`
-- **Path:** `/books`
-- **Description:** Retrieves a list of all books in the library inventory.
-- **Request Body:** None
-- **Success Status Code:** `200 OK`
-
-### 2. Get One Book
-- **Method:** `GET`
-- **Path:** `/books/{id}`
-- **Description:** Retrieves details for a single book specified by its ID.
-- **Request Body:** None
-- **Success Status Code:** `200 OK`
-
-### 3. Create a Book
-- **Method:** `POST`
-- **Path:** `/books`
-- **Description:** Adds a new book to the library catalog.
-- **Request Body Example:**
-  ```json
+### 1. Get All Books
+* **Method:** `GET`
+* **Path:** `/api/books`
+* **Description:** Retrieves a list of all books in the library system.
+* **Success Response (200 OK):**
+```json
+[
   {
+    "id": 1,
     "title": "Clean Code",
     "author": "Robert C. Martin",
-    "publishedYear": 2008
+    "genre": "Software Engineering",
+    "available": true
   }
+]
+[
+  {
+    "id": 1,
+    "title": "Clean Code",
+    "author": "Robert C. Martin",
+    "genre": "Software Engineering",
+    "available": true
+  }
+]
+{
+  "id": 1,
+  "title": "Clean Code",
+  "author": "Robert C. Martin",
+  "genre": "Software Engineering",
+  "available": true
+}
+{
+  "title": "The Pragmatic Programmer",
+  "author": "Andrew Hunt",
+  "genre": "Software Engineering"
+}
+{
+  "id": 2,
+  "title": "The Pragmatic Programmer",
+  "author": "Andrew Hunt",
+  "genre": "Software Engineering",
+  "available": true
+}
+{
+  "title": "Clean Code (2nd Edition)",
+  "author": "Robert C. Martin",
+  "genre": "Software Engineering",
+  "available": false
+}
+{
+  "id": 1,
+  "title": "Clean Code (2nd Edition)",
+  "author": "Robert C. Martin",
+  "genre": "Software Engineering",
+  "available": false
+}
+{
+  "error": "Bad Request",
+  "message": "Missing required field: title"
+}
+{
+  "error": "Not Found",
+  "message": "Book with ID 9999 was not found."
+}
+
