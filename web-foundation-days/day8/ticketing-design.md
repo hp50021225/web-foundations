@@ -1,61 +1,119 @@
-# TicketHub System Design Document
+# TicketHub System Design Specification
 
-## 1. Context, Goals, & Requirements
-
-### Context
-TicketHub is a high-concurrency event ticketing platform where users browse concerts/events, reserve seats, and purchase tickets. The system must support smooth daily usage as well as high-volume flash sales when high-demand concert tickets drop.
-
-### Goals
-- Enable users to browse events and view real-time seat availability maps.
-- Allow users to temporarily hold seats for a 10-minute payment window.
-- Process ticket purchases reliably without double-booking any seat.
-
-### Non-Goals
-- Third-party ticket resale or secondary marketplace trading.
-- Dynamic ticket pricing algorithms or auction systems.
+## 1. Requirements
 
 ### Functional Requirements
-1. Users can view a list of upcoming events and inspect detailed seat maps for a specific event.
-2. Users can place a selected seat on a temporary 10-minute hold.
-3. Users can complete payment to convert a held seat into a confirmed ticket order.
-4. Users can view their purchased tickets in a personal dashboard.
+* **User Management:** Users can register, log in, and view their purchase history.
+* **Event & Seat Discovery:** Users can browse active events and view real-time seat availability maps.
+* **Seat Reservation (Hold):** Users can temporarily lock/hold a specific seat for 10 minutes during checkout to prevent double-booking.
+* **Checkout & Payment:** Users can complete secure payment to convert a held seat into a confirmed order and ticket.
+* **Ticket Management:** Users can view and download their purchased tickets with unique validation QR codes.
 
 ### Non-Functional Requirements
-- **Speed**: Seat map API requests must return in under 100 ms; cached seat states served in under 10 ms.
-- **Correctness**: Absolute zero double-booking tolerance. Under no circumstances can two users purchase or hold the same physical seat.
-- **Fairness & Availability**: First-come, first-served purchasing during flash sales with graceful degradation under traffic surges.
+* **High Availability & Scalability:** The system must handle a 300× flash-sale traffic surge without crashing.
+* **Correctness & Consistency:** Zero tolerance for double-booking; atomic seat locking is mandatory.
+* **Low Latency:** Seat map reads must return under 200ms; checkout confirmation under 2 seconds.
 
 ---
 
-## 2. Estimates & Traffic Calculations
-
-### Normal Day Traffic
-- **Daily Active Visitors**: 50,000 visitors/day.
-- **Page Views**: 50,000 visitors $\times$ 10 pages = 500,000 page views/day.
-- **Normal Read RPS**: 500,000 requests $\div$ 86,400 seconds $\approx$ **5.78 reads/sec average** (peak ~30 reads/sec).
-- **Daily Ticket Sales**: 5,000 tickets sold/day $\approx$ **0.06 writes/sec average**.
-
-### Flash Sale Peak Traffic ("Big Sale")
-- **Peak Load**: 200,000 users attempting to buy 20,000 seats within a **10-minute window (600 seconds)**.
-- **Read Requests (Seat Maps)**: 200,000 users constantly refreshing seat maps (~5 refreshes/user in 10 min) = 1,000,000 requests $\div$ 600 seconds = **1,666.7 reads/sec average** (peak ~5,000 reads/sec).
-- **Write Requests (Checkout / Holds)**: 20,000 successful seat reservations $\div$ 600 seconds = **33.3 writes/sec average**. However, attempt spikes can reach over **2,000 attempt requests/sec** at the exact second the sale opens.
-
-### Comparison Summary
-Normal traffic is negligible (~6 reads/sec), whereas flash sales cause an instantaneous **300x spike in reads** and an intense burst of concurrent write attempts targeting a small set of database rows.
+## 2. Traffic Estimates & Load Calculations
+* **Daily Active Users (DAU):** 1,000,000 users.
+* **Normal Traffic:** 5,000 requests per second (RPS) read load, 100 RPS write load.
+* **Flash-Sale Surge (Peak):** 
+  * Read load spikes 300× to **1,500,000 RPS** (users refreshing seat maps).
+  * Write load spikes to **15,000 RPS** (simultaneous checkout attempts for high-demand tickets).
 
 ---
 
-## 3. API Design
+## 3. API Endpoints Design
 
-### 1. `GET /api/v1/events`
-- **Description**: Fetch list of upcoming events.
-- **Response**: `200 OK`
-  ```json
-  [
-    {
-      "id": "evt_101",
-      "title": "Live in Concert",
-      "venue": "National Stadium",
-      "date": "2026-12-15T20:00:00Z"
-    }
-  ]
+### 1. View Seat Map
+* **Endpoint:** `GET /api/events/{event_id}/seats`
+* **Description:** Retrieves the real-time availability status of all seats for a given event.
+* **Success Response (200 OK):**
+```json
+{
+  "status": "success",
+  "data": {
+    "event_id": "ev_8f7e6d5c4b",
+    "seats": [
+      { "seat_id": "seat_a1", "section": "VIP", "status": "available", "price": 150.00 },
+      { "seat_id": "seat_a2", "section": "VIP", "status": "held", "price": 150.00 }
+    ]
+  }
+}
+{
+  "event_id": "ev_8f7e6d5c4b",
+  "seat_id": "seat_a1"
+}
+{
+  "status": "success",
+  "message": "Seat successfully held for 10 minutes.",
+  "hold_token": "hold_9a8b7c6d5e",
+  "expires_at": "2026-11-07T21:15:00Z"
+}
+{
+  "hold_token": "hold_9a8b7c6d5e",
+  "payment_method_nonce": "pm_card_visa_debit"
+}
+{
+  "status": "success",
+  "data": {
+    "order_id": "ord_123456789",
+    "total_amount": 150.00,
+    "status": "confirmed",
+    "tickets": [
+      { "ticket_id": "tix_987654", "seat_id": "seat_a1", "qr_code": "[https://tickethub.io/qr/tix_987654](https://tickethub.io/qr/tix_987654)" }
+    ]
+  }
+}
+{
+  "status": "success",
+  "results": 1,
+  "data": {
+    "tickets": [
+      {
+        "ticket_id": "tix_987654",
+        "event_name": "World Tour Live",
+        "seat_id": "seat_a1",
+        "purchased_at": "2026-11-07T20:05:00Z"
+      }
+    ]
+  }
+}
+{
+  "status": "success",
+  "message": "Seat hold released successfully."
+}
+CREATE TABLE users (
+    id SERIAL PRIMARY KEY,
+    username VARCHAR(50) NOT NULL,
+    email VARCHAR(100) UNIQUE NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE events (
+    id SERIAL PRIMARY KEY,
+    title VARCHAR(150) NOT NULL,
+    description TEXT,
+    event_date TIMESTAMP NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE seats (
+    id SERIAL PRIMARY KEY,
+    event_id INT REFERENCES events(id) ON DELETE CASCADE,
+    seat_number VARCHAR(20) NOT NULL,
+    status VARCHAR(20) DEFAULT 'available', -- available, held, booked
+    version INT DEFAULT 0, -- Used for optimistic concurrency control
+    CONSTRAINT unique_event_seat UNIQUE (event_id, seat_number)
+);
+
+CREATE TABLE orders (
+    id SERIAL PRIMARY KEY,
+    user_id INT REFERENCES users(id),
+    seat_id INT REFERENCES seats(id),
+    total_amount DECIMAL(10,2) NOT NULL,
+    status VARCHAR(20) DEFAULT 'pending', -- pending, confirmed, cancelled
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
