@@ -1,67 +1,62 @@
-# SnapShare: Scaling Plan & Architecture
+# Scaling Plan: High-Scale Photo-Sharing Platform
 
-## 1. Assumptions & Daily Active Users (DAU)
-- **Registered Users**: 10,000,000 users.
-- **Activity Rate**: 10% active per day.
-- **Calculation**: $10,000,000 \times 10\% = 1,000,000$ Daily Active Users (DAU).
-- **Behavior**: Each active user uploads 1 photo/day and views 50 feed pages/day.
-- **File Sizes**: Average photo is 2 MB; thumbnail version is 50 KB (0.05 MB). Total size per upload = 2.05 MB.
-- **Rounding Rule**: 1 day $\approx 100,000$ seconds for estimation convenience. Peak traffic is calculated as $\sim 5\times$ average load.
+## 1. System Architecture Overview
 
----
-
-## 2. Load & Storage Calculations
-### Uploads (Writes) per Second
-- **Daily Volume**: $1,000,000 \text{ users} \times 1 \text{ upload} = 1,000,000 \text{ uploads/day}$
-- **Average Rate**: $1,000,000 \div 100,000 \text{ seconds} = 10 \text{ writes/sec}$
-- **Peak Rate ($5\times$)**: $\approx 50 \text{ writes/sec}$
-
-### Feed Views (Reads) per Second
-- **Daily Volume**: $1,000,000 \text{ users} \times 50 \text{ feed views} = 50,000,000 \text{ views/day}$
-- **Average Rate**: $50,000,000 \div 100,000 \text{ seconds} = 500 \text{ reads/sec}$
-- **Peak Rate ($5\times$)**: $\approx 2,500 \text{ reads/sec}$
-
-### Annual Storage Growth
-- **Daily Storage**: $1,000,000 \text{ uploads} \times 2.05 \text{ MB} = 2,050,000 \text{ MB/day} = 2.05 \text{ TB/day}$
-- **Annual Storage**: $2.05 \text{ TB/day} \times 365 \text{ days} = 748.25 \text{ TB/year}$ (approx. ~750 TB/year)
+    [Client App / Web]
+            |
+            v
+    [CDN (Cloudflare / CloudFront)]
+            |
+            v
+    [Load Balancer (Nginx / ALB)]
+            |
+            v
+    [API Application Servers (Node/Python)]
+           /         |                     \
+          /          |                      \
+         v           v                       v
+    [Redis Cache]  [PostgreSQL Primary]   [S3 Object Storage]
+                         |                         |
+                         v                         v
+                   [Read Replicas]         [Message Queue (SQS)]
+                                                   |
+                                                   v
+                                           [Background Workers]
 
 ---
 
-## 3. System Read/Write Profile
-- **Profile**: The system is **heavily read-heavy** (500 feed reads vs. 10 writes per second, or a 50:1 ratio).
-- **Design Impact**: Because reads heavily outweigh writes, the architecture relies heavily on read replicas to scale database queries and a Redis cache to serve fast feed views.
+## 2. Component Descriptions
+
+* **CDN (Content Delivery Network):** Caches static assets and high-demand image files globally edge-side to drastically reduce latency and offload bandwidth from origin servers.
+* **Load Balancer:** Distributes incoming HTTP traffic evenly across multiple application server instances to ensure high availability and prevent single-point overload.
+* **API Application Servers:** Handles client requests, user authentication, business logic validation, metadata database transactions, and background task dispatching.
+* **Redis In-Memory Cache:** Stores frequently accessed database queries, user sessions, and trending feed data in RAM for sub-millisecond retrieval speeds.
+* **PostgreSQL Primary Database:** Serves as the authoritative ACID-compliant transactional database handling all database write operations (user registration, photo metadata creation, comments).
+* **PostgreSQL Read Replicas:** Asynchronously replicates data from the primary instance to serve high-volume `GET` read queries without locks or primary database exhaustion.
+* **S3 Object Storage:** Provides highly durable, horizontally scalable storage designed specifically for storing raw, high-resolution image binaries and generated thumbnail files.
+* **Message Queue (RabbitMQ / AWS SQS):** Decouples image processing pipelines by queuing asynchronous background jobs immediately after file uploads complete.
+* **Background Image Workers:** Consumes job messages from the queue to process, resize, optimize, and generate multi-resolution thumbnails without blocking user requests.
 
 ---
 
-## 4. Why Photos Don't Belong in the Database
-Storing massive binary files (like 2 MB photos) directly inside a relational database will quickly bloat table sizes, slow down query performance, and make backups extremely difficult. Instead, databases should only store lightweight **metadata** (such as owner ID, caption text, upload timestamp, and the public URL string), while the actual image files are offloaded to dedicated **Object Storage** (like AWS S3).
+## 3. End-to-End Image Upload Lifecycle Walkthrough
+
+1. **Upload Initiation:** The client application issues an HTTP `POST /api/photos/upload` request containing the image binary and photo metadata (title, caption, location) to the API Gateway/Load Balancer.
+2. **Metadata Validation & Storage:** An Application Server instance validates the request payload, generates a unique image ID, and writes the lightweight metadata record into the **PostgreSQL Primary Database**.
+3. **Binary Storage Offloading:** The Application Server uploads the raw image file directly to **S3 Object Storage** under a key corresponding to the generated image ID.
+4. **Asynchronous Job Dispatch:** Once S3 confirms file receipt, the Application Server pushes a `process-thumbnail` payload containing the `imageId` and `s3Path` into the **Message Queue**.
+5. **Immediate Client Response:** The Application Server responds to the user with `201 Created` and the new photo details, allowing the user to continue browsing immediately without waiting for thumbnail generation.
+6. **Worker Processing:** A **Background Image Worker** picks up the job from the Message Queue, fetches the raw image from S3, generates standard display resolutions and thumbnails, and uploads the processed variants back to S3.
+7. **Cache Invalidation & Feed Sync:** The worker updates the photo status in the database to `ready` and invalidates relevant **Redis Cache** keys so the user's updated feed reflects the newly available thumbnails.
 
 ---
 
-## 5. Architecture Diagram
+## 4. Architectural Trade-offs & Mitigation
 
-```text
-[Browser / Mobile Client]
-     │
-     ├─> Static UI files (HTML/CSS/JS) ──> [ CDN ]
-     │
-     └─> API Requests (Upload / Feed) ──> [ Load Balancer ]
-                                                 │
-                            ┌────────────────────┼────────────────────┐
-                            v                    v                    v
-                       [ App Server 1 ]     [ App Server 2 ]     [ App Server 3 ]
-                            │                    │                    │
-                            ├────────────────────┴────────────────────┤
-                            │                                         v
-                            │                                   [ Redis Cache ]
-                            v writes                              (feed caches)
-                       [ Primary DB ]
-                            │ copy
-                            v
-                       [ Read Replica ] <── reads (feed lists)
-                            │
-                            │ enqueue thumbnail job
-                            v
-                       [ Message Queue ] ──> [ Background Worker ] ──> Generates Thumbnail
-                                                      │
-                                                      └──────> [ Object Storage (S3) ]
+### Trade-off 1: Replication Lag & Eventual Consistency
+* **Issue:** Because read replicas receive updates asynchronously from the primary database, there is a short millisecond-level delay before newly written records propagate to every read replica. A user posting a picture might immediately refresh their feed and hit a replica that has not yet received the new row.
+* **Mitigation:** Implement read-your-own-writes consistency by routing initial feed refreshes for the active author directly to the primary database or local session cache for the first 5 seconds following an upload action.
+
+### Trade-off 2: Message Queue Backlog During Traffic Spikes
+* **Issue:** During peak hours or breaking viral events, the rate of incoming photo uploads can exceed the capacity of active background image workers, creating a backlog in the message queue and delaying thumbnail generation for end users.
+* **Mitigation:** Configure Auto-Scaling Policies for worker nodes based on total queue depth (e.g., spin up additional worker instances whenever the queue length exceeds 1,000 pending messages).
